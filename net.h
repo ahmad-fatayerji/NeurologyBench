@@ -34,6 +34,9 @@ double mean_squared_error(double* expected, double* result, int array_length);
 void mean_squared_prime(double* expected, double* result, int array_length, double *output);
 double cross_entropy_loss(double* expected, double* logits, int array_length);
 void cross_entropy_prime(double* expected, double* logits, int array_length, double *output);
+void relu_activation(double *input, int input_size, double *result);
+void relu_p(double *input, int input_size, double *result);
+void tanh_activation(double *input, int input_size, double *result);
 
 typedef double (*loss)(double*, double*, int);
 typedef void (*loss_prime)(double*, double*, int, double*);
