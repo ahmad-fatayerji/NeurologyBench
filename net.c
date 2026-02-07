@@ -2122,6 +2122,7 @@ double evaluate(Network *net, int num_samples, double *x_flat, double *y_flat, i
 }
 
 // main entry point for mnist training and testing
+#ifndef NET_NO_MAIN
 int main(void) {
 	srand((unsigned)time(NULL)); // Random seed for weight initialization
 
@@ -2388,6 +2389,7 @@ int main(void) {
 	destroyNetwork(net);
 	return 0;
 }
+#endif
 
 
 

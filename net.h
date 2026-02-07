@@ -63,6 +63,8 @@ void fit(Network *net, int num_samples, int sample_size, int sizeOfOutput, doubl
 void enableVisualizer(Network* net, int flag);
 double *infer_sample(Network *net, double *input_flat, int channels, int height, int width);
 double evaluate(Network *net, int num_samples, double *x_flat, double *y_flat, int channels, int height, int width, int num_classes);
+double (*load_mnist_images(const char *path, int *num_images))[28][28];
+double *load_mnist_labels(const char *path, int *num_labels);
 struct Layer {
     double **weights;
     double *bias;
