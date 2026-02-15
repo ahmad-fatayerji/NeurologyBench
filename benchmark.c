@@ -6,6 +6,7 @@
 
 #include <string.h>
 #include <stdint.h>
+#include <float.h>
 
 static double now_seconds(void) {
 #if defined(CLOCK_MONOTONIC)
@@ -194,9 +195,20 @@ int main(int argc, char **argv) {
 	}
 
 	double start = now_seconds();
+	double min_latency_ms = DBL_MAX;
+	double max_latency_ms = 0.0;
 	for (int r = 0; r < runs; ++r) {
 		for (int i = 0; i < samples; ++i) {
+			double infer_start = now_seconds();
 			double *out = infer_sample(net, x_test_flat + (size_t)i * 28 * 28, channels, height, width);
+			double infer_end = now_seconds();
+			double infer_ms = (infer_end - infer_start) * 1000.0;
+			if (infer_ms < min_latency_ms) {
+				min_latency_ms = infer_ms;
+			}
+			if (infer_ms > max_latency_ms) {
+				max_latency_ms = infer_ms;
+			}
 			if (out) {
 				free(out);
 			}
@@ -212,6 +224,8 @@ int main(int argc, char **argv) {
 	printf("Total inferences: %.0f\n", total_infers);
 	printf("Total time: %.6f s\n", total_time);
 	printf("Avg latency: %.3f ms\n", per_infer_ms);
+	printf("Min latency: %.3f ms\n", min_latency_ms);
+	printf("Max latency: %.3f ms\n", max_latency_ms);
 	printf("Throughput: %.2f inf/s\n", throughput);
 
 	if (csv_path) {
@@ -219,9 +233,9 @@ int main(int argc, char **argv) {
 		if (!csv) {
 			printf("ERROR: Failed to open CSV file: %s\n", csv_path);
 		} else {
-			fprintf(csv, "model,samples,warmup,runs,threads,total_infers,total_time_s,avg_latency_ms,throughput_inf_s\n");
-			fprintf(csv, "%s,%d,%d,%d,%d,%.0f,%.6f,%.3f,%.2f\n",
-				model, samples, warmup, runs, threads, total_infers, total_time, per_infer_ms, throughput);
+			fprintf(csv, "model,samples,warmup,runs,threads,total_infers,total_time_s,avg_latency_ms,min_latency_ms,max_latency_ms,throughput_inf_s\n");
+			fprintf(csv, "%s,%d,%d,%d,%d,%.0f,%.6f,%.3f,%.3f,%.3f,%.2f\n",
+				model, samples, warmup, runs, threads, total_infers, total_time, per_infer_ms, min_latency_ms, max_latency_ms, throughput);
 			fclose(csv);
 			printf("CSV written to: %s\n", csv_path);
 		}
