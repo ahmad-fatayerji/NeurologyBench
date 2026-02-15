@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <float.h>
+#include <limits.h>
 #include <errno.h>
 #include <sys/stat.h>
 
