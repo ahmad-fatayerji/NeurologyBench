@@ -7,6 +7,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <float.h>
+#include <errno.h>
+#include <sys/stat.h>
 
 static double now_seconds(void) {
 #if defined(CLOCK_MONOTONIC)
@@ -19,7 +21,7 @@ static double now_seconds(void) {
 }
 
 static void usage(const char *exe) {
-	printf("Usage: %s [--model cnn|fc] [--samples N] [--warmup N] [--runs N] [--threads N] [--mnist-dir PATH] [--csv FILE]\n", exe);
+	printf("Usage: %s [--model cnn|fc] [--samples N] [--warmup N] [--runs N] [--threads N[,N...]] [--mnist-dir PATH] [--csv FILE]\n", exe);
 	printf("Defaults: --model cnn --samples 100 --warmup 10 --runs 20 --threads 4 --mnist-dir MNIST\n");
 }
 
@@ -75,6 +77,146 @@ static Network *build_fc(void) {
 	return net;
 }
 
+typedef struct {
+	double total_infers;
+	double total_time_s;
+	double avg_latency_ms;
+	double min_latency_ms;
+	double max_latency_ms;
+	double throughput_inf_s;
+} BenchmarkStats;
+
+static int parse_thread_list(const char *arg, int *threads_out, int max_threads, int *count_out) {
+	char buf[256];
+	char *saveptr = NULL;
+	int count = 0;
+
+	if (!arg || !threads_out || !count_out || max_threads <= 0) {
+		return 0;
+	}
+
+	snprintf(buf, sizeof(buf), "%s", arg);
+	for (char *tok = strtok_r(buf, ",", &saveptr); tok; tok = strtok_r(NULL, ",", &saveptr)) {
+		char *end = NULL;
+		errno = 0;
+		long v = strtol(tok, &end, 10);
+		if (end == tok || *end != '\0' || errno == ERANGE || v <= 0 || v > INT_MAX) {
+			return 0;
+		}
+		if (count >= max_threads) {
+			return 0;
+		}
+		threads_out[count++] = (int)v;
+	}
+
+	if (count == 0) {
+		return 0;
+	}
+
+	*count_out = count;
+	return 1;
+}
+
+static BenchmarkStats run_benchmark(
+	Network *net,
+	int threads,
+	const char *model,
+	double *x_test_flat,
+	int samples,
+	int warmup,
+	int runs,
+	int channels,
+	int height,
+	int width
+) {
+	BenchmarkStats stats = {0};
+	setThreadPoolSize(net, threads);
+
+	printf("Benchmarking %s inference on %d samples (warmup=%d, runs=%d, threads=%d)\n",
+		model, samples, warmup, runs, threads);
+
+	for (int w = 0; w < warmup; ++w) {
+		int idx = w % samples;
+		double *out = infer_sample(net, x_test_flat + (size_t)idx * 28 * 28, channels, height, width);
+		if (out) {
+			free(out);
+		}
+	}
+
+	double start = now_seconds();
+	double min_latency_ms = DBL_MAX;
+	double max_latency_ms = 0.0;
+	for (int r = 0; r < runs; ++r) {
+		for (int i = 0; i < samples; ++i) {
+			double infer_start = now_seconds();
+			double *out = infer_sample(net, x_test_flat + (size_t)i * 28 * 28, channels, height, width);
+			double infer_end = now_seconds();
+			double infer_ms = (infer_end - infer_start) * 1000.0;
+			if (infer_ms < min_latency_ms) {
+				min_latency_ms = infer_ms;
+			}
+			if (infer_ms > max_latency_ms) {
+				max_latency_ms = infer_ms;
+			}
+			if (out) {
+				free(out);
+			}
+		}
+	}
+	double end = now_seconds();
+
+	stats.total_infers = (double)runs * (double)samples;
+	stats.total_time_s = end - start;
+	stats.avg_latency_ms = (stats.total_time_s / stats.total_infers) * 1000.0;
+	stats.min_latency_ms = min_latency_ms;
+	stats.max_latency_ms = max_latency_ms;
+	stats.throughput_inf_s = stats.total_infers / stats.total_time_s;
+
+	printf("Total inferences: %.0f\n", stats.total_infers);
+	printf("Total time: %.6f s\n", stats.total_time_s);
+	printf("Avg latency: %.3f ms\n", stats.avg_latency_ms);
+	printf("Min latency: %.3f ms\n", stats.min_latency_ms);
+	printf("Max latency: %.3f ms\n", stats.max_latency_ms);
+	printf("Throughput: %.2f inf/s\n", stats.throughput_inf_s);
+
+	return stats;
+}
+
+static int file_exists_and_nonempty(const char *path) {
+	struct stat st;
+	if (!path) {
+		return 0;
+	}
+	if (stat(path, &st) != 0) {
+		return 0;
+	}
+	return st.st_size > 0;
+}
+
+static void get_uname_a(char *out, size_t out_size) {
+	FILE *fp = NULL;
+	if (!out || out_size == 0) {
+		return;
+	}
+
+	out[0] = '\0';
+	fp = popen("uname -a", "r");
+	if (!fp) {
+		snprintf(out, out_size, "uname -a unavailable");
+		return;
+	}
+
+	if (!fgets(out, (int)out_size, fp)) {
+		snprintf(out, out_size, "uname -a unavailable");
+	}
+	pclose(fp);
+
+	size_t len = strlen(out);
+	while (len > 0 && (out[len - 1] == '\n' || out[len - 1] == '\r')) {
+		out[--len] = '\0';
+	}
+}
+
 int main(int argc, char **argv) {
 	const char *model = "cnn";
 	const char *mnist_dir = "MNIST";
@@ -82,7 +224,8 @@ int main(int argc, char **argv) {
 	int samples = 100;
 	int warmup = 10;
 	int runs = 20;
-	int threads = 4;
+	int thread_values[16] = {4};
+	int thread_count = 1;
 
 	for (int i = 1; i < argc; ++i) {
 		if (strcmp(argv[i], "--help") == 0) {
@@ -106,7 +249,10 @@ int main(int argc, char **argv) {
 			continue;
 		}
 		if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
-			threads = atoi(argv[++i]);
+			if (!parse_thread_list(argv[++i], thread_values, 16, &thread_count)) {
+				printf("ERROR: Invalid --threads value. Use positive integers, e.g. 1 or 1,4\n");
+				return 1;
+			}
 			continue;
 		}
 		if (strcmp(argv[i], "--mnist-dir") == 0 && i + 1 < argc) {
@@ -122,7 +268,7 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
-	if (samples <= 0 || warmup < 0 || runs <= 0 || threads <= 0) {
+	if (samples <= 0 || warmup < 0 || runs <= 0 || thread_count <= 0) {
 		printf("ERROR: Invalid numeric arguments.\n");
 		return 1;
 	}
@@ -130,7 +276,10 @@ int main(int argc, char **argv) {
 	srand(0);
 
 	char img_path[512];
+	char uname_info[512];
 	snprintf(img_path, sizeof(img_path), "%s/t10k-images-idx3-ubyte/t10k-images.idx3-ubyte", mnist_dir);
+	get_uname_a(uname_info, sizeof(uname_info));
+	printf("System: %s\n", uname_info);
 
 	int number_of_images = 0;
 	double (*testImages)[28][28] = load_mnist_images(img_path, &number_of_images);
@@ -181,63 +330,28 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
-	setThreadPoolSize(net, threads);
-
-	printf("Benchmarking %s inference on %d samples (warmup=%d, runs=%d, threads=%d)\n",
-		model, samples, warmup, runs, threads);
-
-	for (int w = 0; w < warmup; ++w) {
-		int idx = w % samples;
-		double *out = infer_sample(net, x_test_flat + (size_t)idx * 28 * 28, channels, height, width);
-		if (out) {
-			free(out);
-		}
-	}
-
-	double start = now_seconds();
-	double min_latency_ms = DBL_MAX;
-	double max_latency_ms = 0.0;
-	for (int r = 0; r < runs; ++r) {
-		for (int i = 0; i < samples; ++i) {
-			double infer_start = now_seconds();
-			double *out = infer_sample(net, x_test_flat + (size_t)i * 28 * 28, channels, height, width);
-			double infer_end = now_seconds();
-			double infer_ms = (infer_end - infer_start) * 1000.0;
-			if (infer_ms < min_latency_ms) {
-				min_latency_ms = infer_ms;
-			}
-			if (infer_ms > max_latency_ms) {
-				max_latency_ms = infer_ms;
-			}
-			if (out) {
-				free(out);
-			}
-		}
-	}
-	double end = now_seconds();
-
-	double total_infers = (double)runs * (double)samples;
-	double total_time = end - start;
-	double per_infer_ms = (total_time / total_infers) * 1000.0;
-	double throughput = total_infers / total_time;
-
-	printf("Total inferences: %.0f\n", total_infers);
-	printf("Total time: %.6f s\n", total_time);
-	printf("Avg latency: %.3f ms\n", per_infer_ms);
-	printf("Min latency: %.3f ms\n", min_latency_ms);
-	printf("Max latency: %.3f ms\n", max_latency_ms);
-	printf("Throughput: %.2f inf/s\n", throughput);
-
 	if (csv_path) {
-		FILE *csv = fopen(csv_path, "w");
+		int has_rows = file_exists_and_nonempty(csv_path);
+		FILE *csv = fopen(csv_path, "a");
 		if (!csv) {
 			printf("ERROR: Failed to open CSV file: %s\n", csv_path);
 		} else {
-			fprintf(csv, "model,samples,warmup,runs,threads,total_infers,total_time_s,avg_latency_ms,min_latency_ms,max_latency_ms,throughput_inf_s\n");
-			fprintf(csv, "%s,%d,%d,%d,%d,%.0f,%.6f,%.3f,%.3f,%.3f,%.2f\n",
-				model, samples, warmup, runs, threads, total_infers, total_time, per_infer_ms, min_latency_ms, max_latency_ms, throughput);
+			if (!has_rows) {
+				fprintf(csv, "model,samples,warmup,runs,threads,total_infers,total_time_s,avg_latency_ms,min_latency_ms,max_latency_ms,throughput_inf_s,uname_a\n");
+			}
+			for (int t = 0; t < thread_count; ++t) {
+				BenchmarkStats stats = run_benchmark(
+					net, thread_values[t], model, x_test_flat, samples, warmup, runs, channels, height, width);
+				fprintf(csv, "%s,%d,%d,%d,%d,%.0f,%.6f,%.3f,%.3f,%.3f,%.2f,\"%s\"\n",
+					model, samples, warmup, runs, thread_values[t], stats.total_infers, stats.total_time_s, stats.avg_latency_ms,
+					stats.min_latency_ms, stats.max_latency_ms, stats.throughput_inf_s, uname_info);
+			}
 			fclose(csv);
-			printf("CSV written to: %s\n", csv_path);
+			printf("CSV appended to: %s\n", csv_path);
+		}
+	} else {
+		for (int t = 0; t < thread_count; ++t) {
+			run_benchmark(net, thread_values[t], model, x_test_flat, samples, warmup, runs, channels, height, width);
 		}
 	}
 
