@@ -81,8 +81,6 @@ static Network *build_fc(void) {
 typedef struct {
 	double total_infers;
 	double total_time_s;
-	double best_run_time_s;
-	double worst_run_time_s;
 	double avg_latency_ms;
 	double min_latency_ms;
 	double max_latency_ms;
@@ -147,12 +145,9 @@ static BenchmarkStats run_benchmark(
 	}
 
 	double start = now_seconds();
-	double best_run_time_s = DBL_MAX;
-	double worst_run_time_s = 0.0;
 	double min_latency_ms = DBL_MAX;
 	double max_latency_ms = 0.0;
 	for (int r = 0; r < runs; ++r) {
-		double run_start = now_seconds();
 		for (int i = 0; i < samples; ++i) {
 			double infer_start = now_seconds();
 			double *out = infer_sample(net, x_test_flat + (size_t)i * 28 * 28, channels, height, width);
@@ -168,20 +163,11 @@ static BenchmarkStats run_benchmark(
 				free(out);
 			}
 		}
-		double run_time_s = now_seconds() - run_start;
-		if (run_time_s < best_run_time_s) {
-			best_run_time_s = run_time_s;
-		}
-		if (run_time_s > worst_run_time_s) {
-			worst_run_time_s = run_time_s;
-		}
 	}
 	double end = now_seconds();
 
 	stats.total_infers = (double)runs * (double)samples;
 	stats.total_time_s = end - start;
-	stats.best_run_time_s = best_run_time_s;
-	stats.worst_run_time_s = worst_run_time_s;
 	stats.avg_latency_ms = (stats.total_time_s / stats.total_infers) * 1000.0;
 	stats.min_latency_ms = min_latency_ms;
 	stats.max_latency_ms = max_latency_ms;
@@ -189,8 +175,6 @@ static BenchmarkStats run_benchmark(
 
 	printf("Total inferences: %.0f\n", stats.total_infers);
 	printf("Total time: %.6f s\n", stats.total_time_s);
-	printf("Best run time: %.6f s\n", stats.best_run_time_s);
-	printf("Worst run time: %.6f s\n", stats.worst_run_time_s);
 	printf("Avg latency: %.3f ms\n", stats.avg_latency_ms);
 	printf("Min latency: %.3f ms\n", stats.min_latency_ms);
 	printf("Max latency: %.3f ms\n", stats.max_latency_ms);
@@ -354,14 +338,14 @@ int main(int argc, char **argv) {
 			printf("ERROR: Failed to open CSV file: %s\n", csv_path);
 		} else {
 			if (!has_rows) {
-				fprintf(csv, "model,samples,warmup,runs,threads,total_infers,total_time_s,best_run_time_s,worst_run_time_s,avg_latency_ms,min_latency_ms,max_latency_ms,throughput_inf_s,uname_a\n");
+				fprintf(csv, "model,samples,warmup,runs,threads,total_infers,total_time_s,avg_latency_ms,min_latency_ms,max_latency_ms,throughput_inf_s,uname_a\n");
 			}
 			for (int t = 0; t < thread_count; ++t) {
 				BenchmarkStats stats = run_benchmark(
 					net, thread_values[t], model, x_test_flat, samples, warmup, runs, channels, height, width);
-				fprintf(csv, "%s,%d,%d,%d,%d,%.0f,%.6f,%.6f,%.6f,%.3f,%.3f,%.3f,%.2f,\"%s\"\n",
-					model, samples, warmup, runs, thread_values[t], stats.total_infers, stats.total_time_s, stats.best_run_time_s,
-					stats.worst_run_time_s, stats.avg_latency_ms, stats.min_latency_ms, stats.max_latency_ms, stats.throughput_inf_s, uname_info);
+				fprintf(csv, "%s,%d,%d,%d,%d,%.0f,%.6f,%.3f,%.3f,%.3f,%.2f,\"%s\"\n",
+					model, samples, warmup, runs, thread_values[t], stats.total_infers, stats.total_time_s, stats.avg_latency_ms,
+					stats.min_latency_ms, stats.max_latency_ms, stats.throughput_inf_s, uname_info);
 			}
 			fclose(csv);
 			printf("CSV appended to: %s\n", csv_path);
